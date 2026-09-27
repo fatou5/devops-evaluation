@@ -30,3 +30,11 @@ def test_metrics_endpoint():
 
     assert response.status_code == 200
     assert "http_requests_total" in response.text
+
+
+def test_slow_endpoint():
+    response = client.get("/test-slow")
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "intentional slow response"
+

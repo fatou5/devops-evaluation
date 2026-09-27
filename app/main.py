@@ -93,6 +93,15 @@ def test_error():
     )
 
 
+@app.get("/test-slow")
+def test_slow():
+    time.sleep(0.6)
+
+    return {
+        "message": "intentional slow response",
+    }
+
+
 @app.get("/metrics")
 def metrics():
     return Response(
