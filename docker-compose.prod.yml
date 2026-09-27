@@ -1,0 +1,39 @@
+services:
+
+  app:
+    image: ${IMAGE_NAME}:${IMAGE_TAG}
+    container_name: devops-evaluation-app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      APP_VERSION: ${APP_VERSION}
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: devops-evaluation-redis
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "ping"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5

@@ -1,0 +1,200 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    name: Build, publish and deploy
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(cat VERSION)"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid semantic version: $VERSION"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set image variables
+        id: image
+        shell: bash
+        run: |
+          IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
+          COMMIT_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          SHORT_SHA="${COMMIT_SHA::7}"
+
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image_name }}:latest
+            ${{ steps.image.outputs.image_name }}:${{ steps.image.outputs.short_sha }}
+            ${{ steps.image.outputs.image_name }}:${{ steps.version.outputs.version }}
+
+      - name: Save previous deployment
+        id: previous
+        shell: bash
+        run: |
+          STATE_DIR="$HOME/.devops-evaluation"
+          STATE_FILE="$STATE_DIR/current_sha"
+
+          mkdir -p "$STATE_DIR"
+
+          if [ -f "$STATE_FILE" ]; then
+            PREVIOUS_SHA="$(cat "$STATE_FILE")"
+            echo "previous_sha=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+            echo "Previous deployment found."
+          else
+            echo "previous_sha=" >> "$GITHUB_OUTPUT"
+            echo "No previous deployment found."
+          fi
+
+      - name: Deploy new version
+        id: deploy
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.short_sha }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -e
+
+          docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
+          docker compose \
+            -f docker-compose.prod.yml \
+            down
+
+          docker compose \
+            -f docker-compose.prod.yml \
+            up -d
+
+      - name: Post-deploy healthcheck
+        id: healthcheck
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "Healthcheck attempt ${attempt}/3"
+
+            if curl --fail --silent --show-error \
+              --max-time 10 \
+              http://localhost:8000/health; then
+              echo
+              echo "Deployment healthcheck succeeded."
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+
+          echo "Deployment healthcheck failed after 3 attempts."
+          exit 1
+
+      - name: Roll back previous version
+        id: rollback
+        if: steps.healthcheck.outcome == 'failure' && steps.previous.outputs.previous_sha != ''
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          PREVIOUS_SHA: ${{ steps.previous.outputs.previous_sha }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Rolling back to previous SHA: ${PREVIOUS_SHA}"
+
+          docker pull "${IMAGE_NAME}:${PREVIOUS_SHA}"
+
+          docker compose \
+            -f docker-compose.prod.yml \
+            down
+
+          IMAGE_TAG="${PREVIOUS_SHA}" \
+          APP_VERSION="rollback-${PREVIOUS_SHA}" \
+          docker compose \
+            -f docker-compose.prod.yml \
+            up -d
+
+          for attempt in 1 2 3; do
+            echo "Rollback healthcheck attempt ${attempt}/3"
+
+            if curl --fail --silent --show-error \
+              --max-time 10 \
+              http://localhost:8000/health; then
+              echo
+              echo "Rollback succeeded."
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+
+          echo "Rollback healthcheck failed."
+          exit 1
+
+      - name: Fail deployment after rollback
+        if: steps.healthcheck.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "Deployment failed. Previous version was restored when available."
+          exit 1
+
+      - name: Save successful deployment
+        if: steps.healthcheck.outcome == 'success'
+        env:
+          SHORT_SHA: ${{ steps.image.outputs.short_sha }}
+        shell: bash
+        run: |
+          STATE_DIR="$HOME/.devops-evaluation"
+          mkdir -p "$STATE_DIR"
+
+          printf '%s\n' "$SHORT_SHA" > "$STATE_DIR/current_sha"
+
+          echo "Deployment recorded successfully."
