@@ -67,6 +67,7 @@ def startup():
 @app.get("/")
 def root():
     redis_client.incr("requests")
+
     return {
         "message": "DevOps Evaluation API",
         "version": APP_VERSION,
@@ -81,6 +82,15 @@ def health():
         "status": "healthy",
         "version": APP_VERSION,
     }
+
+
+@app.get("/test-error")
+def test_error():
+    return Response(
+        content='{"error":"intentional test error"}',
+        status_code=500,
+        media_type="application/json",
+    )
 
 
 @app.get("/metrics")

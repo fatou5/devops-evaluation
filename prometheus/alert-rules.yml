@@ -1,0 +1,32 @@
+groups:
+  - name: devops-evaluation
+    rules:
+
+      - alert: HighHTTP5xxRatio
+        expr: |
+          (
+            sum(rate(http_requests_total{code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Elevated HTTP 5xx ratio
+          description: More than 5% of HTTP requests are returning 5xx for 2 minutes.
+
+      - alert: HighHTTPP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (endpoint, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Elevated HTTP p95 latency
+          description: HTTP p95 latency is above 500ms for 2 minutes.
